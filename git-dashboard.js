@@ -119,6 +119,19 @@ function createIconPNG() {
 
 const ICON_PNG = createIconPNG()
 
+const MANIFEST = JSON.stringify({
+  name: 'Git Dashboard',
+  short_name: 'Git',
+  description: 'Local git branch dashboard',
+  start_url: '/',
+  display: 'standalone',
+  background_color: '#ffffff',
+  theme_color: '#10b981',
+  icons: [
+    { src: '/apple-touch-icon.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' }
+  ]
+})
+
 // Directory to scan for git repos — pass as a CLI argument or set a default below
 const SCAN_DIR = process.argv[2]
   ? resolve(process.argv[2])
@@ -222,6 +235,8 @@ const HTML = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8" />
   <title>Git</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/apple-touch-icon.png" type="image/png" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Git" />
@@ -636,6 +651,12 @@ if (PROJECTS.length === 0) {
 
 createServer((req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`)
+
+  if (url.pathname === '/manifest.json') {
+    res.writeHead(200, { 'Content-Type': 'application/manifest+json' })
+    res.end(MANIFEST)
+    return
+  }
 
   if (url.pathname === '/apple-touch-icon.png' || url.pathname === '/favicon.png') {
     res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' })
