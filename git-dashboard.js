@@ -1,0 +1,681 @@
+#!/usr/bin/env node
+// Git Branch Dashboard
+// Usage: node git-dashboard.js [path/to/your/projects]
+// Opens at http://localhost:7799
+
+import { createServer } from 'http'
+import { execFileSync, execSync } from 'child_process'
+import { readdirSync, existsSync } from 'fs'
+import { join, resolve } from 'path'
+import { homedir } from 'os'
+import { deflateSync } from 'zlib'
+
+const PORT = 7799
+const SEP = '\x1f'
+
+// --- Icon PNG generator (no npm deps — pure Node built-ins) ---
+function createIconPNG() {
+  const SIZE = 512
+
+  // CRC32 table
+  const crcTable = new Uint32Array(256)
+  for (let i = 0; i < 256; i++) {
+    let c = i
+    for (let j = 0; j < 8; j++) c = (c & 1) ? 0xEDB88320 ^ (c >>> 1) : c >>> 1
+    crcTable[i] = c >>> 0
+  }
+  function crc32(buf) {
+    let c = 0xFFFFFFFF
+    for (const b of buf) c = crcTable[(c ^ b) & 0xFF] ^ (c >>> 8)
+    return (c ^ 0xFFFFFFFF) >>> 0
+  }
+  function pngChunk(type, data) {
+    const t = Buffer.from(type, 'ascii')
+    const d = Buffer.isBuffer(data) ? data : Buffer.from(data)
+    const len = Buffer.alloc(4); len.writeUInt32BE(d.length)
+    const crcBuf = Buffer.alloc(4); crcBuf.writeUInt32BE(crc32(Buffer.concat([t, d])))
+    return Buffer.concat([len, t, d, crcBuf])
+  }
+
+  // Distance from point to line segment (for anti-aliased line drawing)
+  function lineDist(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1, dy = y2 - y1
+    const lenSq = dx * dx + dy * dy
+    if (lenSq === 0) return Math.hypot(px - x1, py - y1)
+    const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq))
+    return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+  }
+
+  // Anti-aliased alpha: 1.0 inside, 0.0 outside, smooth edge ±1.5px
+  function edgeAlpha(dist, radius) {
+    return Math.max(0, Math.min(1, (radius + 1.5 - dist) / 3))
+  }
+
+  // Blend colorA (background) toward colorB by alpha
+  function blend(bg, fg, alpha) {
+    return bg.map((v, i) => Math.round(v * (1 - alpha) + fg[i] * alpha))
+  }
+
+  // Colors — GitHub dark theme palette
+  const BG    = [13, 17, 23]      // #0d1117  GitHub dark background
+  const GREEN = [137, 87, 229]    // #8957e5  GitHub purple
+
+  const LINE_W = 15  // stroke half-width
+
+  // Node positions and radii
+  const nBottom = [195, 420]; const rBottom = 50
+  const nTop    = [195,  90]; const rTop    = 50
+  const nBranch = [345, 275]; const rBranch = 42
+
+  // Curved branch: horizontal from stem to arc start, then quarter-circle arc up to branch node
+  // Arc center at (280, 275), radius 65 → bottom=(280,340), right=(345,275)
+  const arcCX = 280, arcCY = 275, arcR = 65
+  const horizY = arcCY + arcR  // 340 — y of horizontal segment
+
+  // Build pixel data
+  const rows = []
+  for (let y = 0; y < SIZE; y++) {
+    rows.push(0) // PNG filter: None
+    for (let x = 0; x < SIZE; x++) {
+      let rgb = [...BG]
+
+      // Vertical stem
+      const stemA = edgeAlpha(lineDist(x, y, nBottom[0], nBottom[1], nTop[0], nTop[1]), LINE_W)
+      if (stemA > 0) rgb = blend(rgb, GREEN, stemA)
+
+      // Horizontal segment (stem x → arc start x, at horizY)
+      const horizA = edgeAlpha(lineDist(x, y, nBottom[0], horizY, arcCX, horizY), LINE_W)
+      if (horizA > 0) rgb = blend(rgb, GREEN, horizA)
+
+      // Quarter-circle arc from angle=0 (right) to angle=π/2 (down-in-screen = toward horizY)
+      const adx = x - arcCX, ady = y - arcCY
+      const arcAngle = Math.atan2(ady, adx)
+      if (arcAngle >= 0 && arcAngle <= Math.PI / 2) {
+        const arcA = edgeAlpha(Math.abs(Math.hypot(adx, ady) - arcR), LINE_W)
+        if (arcA > 0) rgb = blend(rgb, GREEN, arcA)
+      }
+
+      // Solid filled nodes
+      for (const [[nx, ny], r] of [[nBottom, rBottom], [nTop, rTop], [nBranch, rBranch]]) {
+        const a = edgeAlpha(Math.hypot(x - nx, y - ny), r)
+        if (a > 0) rgb = blend(rgb, GREEN, a)
+      }
+
+      rows.push(rgb[0], rgb[1], rgb[2], 255)
+    }
+  }
+
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(SIZE, 0); ihdr.writeUInt32BE(SIZE, 4)
+  ihdr[8] = 8; ihdr[9] = 6 // 8-bit RGBA
+
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), // PNG signature
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', deflateSync(Buffer.from(rows))),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ])
+}
+
+const ICON_PNG = createIconPNG()
+
+// Directory to scan for git repos — pass as a CLI argument or set a default below
+const SCAN_DIR = process.argv[2]
+  ? resolve(process.argv[2])
+  : join(homedir(), 'Documents', 'GitHub')
+
+// --- Discover git repos ---
+function findRepos(dir) {
+  if (!existsSync(dir)) return []
+  return readdirSync(dir, { withFileTypes: true })
+    .filter(e => e.isDirectory() && existsSync(join(dir, e.name, '.git')))
+    .map(e => ({ name: e.name, path: join(dir, e.name) }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+function git(cwd, args, opts = {}) {
+  return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', timeout: 8000, ...opts })
+}
+
+function getBranchCount(projectPath) {
+  try {
+    const out = git(projectPath, ['branch', '-vv'], { timeout: 3000 })
+    return out.trim().split('\n').filter(l => l && !l.includes(': gone]')).length
+  } catch { return 0 }
+}
+
+// --- Branch list ---
+function getBranches(projectPath) {
+  try {
+    try { git(projectPath, ['fetch', '--quiet'], { stdio: 'pipe' }) } catch {}
+    const fmt = `%(HEAD)${SEP}%(refname:short)${SEP}%(objectname:short)${SEP}%(subject)${SEP}%(committerdate:relative)${SEP}%(upstream:track)${SEP}%(authorname)`
+    const out = git(projectPath, ['for-each-ref', '--sort=-committerdate', 'refs/heads/', `--format=${fmt}`])
+    return out.trim().split('\n').filter(Boolean).map(line => {
+      const [head, name, hash, subject, date, track = '', author = ''] = line.split(SEP)
+      return {
+        current: head.trim() === '*',
+        name, hash, subject, date, author,
+        gone: track.includes('gone'),
+        ahead: parseInt((track.match(/ahead (\d+)/) || [])[1] || 0),
+        behind: parseInt((track.match(/behind (\d+)/) || [])[1] || 0),
+      }
+    }).filter(b => !b.gone)
+  } catch { return [] }
+}
+
+function getDefaultBranch(projectPath) {
+  try {
+    return git(projectPath, ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short']).trim().replace('origin/', '')
+  } catch { return 'main' }
+}
+
+// --- Branch detail ---
+function getBranchDetail(projectPath, branchName, defaultBranch) {
+  const detail = { commits: [], files: [], pr: null, ahead: 0, behind: 0 }
+
+  // Commits unique to this branch vs default
+  try {
+    const fmt = `%h${SEP}%s${SEP}%cr${SEP}%an`
+    const out = git(projectPath, ['log', `${defaultBranch}..${branchName}`, `--format=${fmt}`])
+    detail.commits = out.trim().split('\n').filter(Boolean).map(line => {
+      const [hash, subject, date, author] = line.split(SEP)
+      return { hash, subject, date, author }
+    })
+  } catch {}
+
+  // Ahead/behind count
+  try {
+    const out = git(projectPath, ['rev-list', '--left-right', '--count', `${defaultBranch}...${branchName}`]).trim()
+    const [behind, ahead] = out.split('\t').map(Number)
+    detail.ahead = ahead || 0
+    detail.behind = behind || 0
+  } catch {}
+
+  // Changed files vs default branch
+  try {
+    const out = git(projectPath, ['diff', '--numstat', `${defaultBranch}...${branchName}`])
+    detail.files = out.trim().split('\n').filter(Boolean).map(line => {
+      const [add, del, ...nameParts] = line.split('\t')
+      return { name: nameParts.join('\t'), additions: parseInt(add) || 0, deletions: parseInt(del) || 0 }
+    })
+  } catch {}
+
+  // PR status via gh CLI
+  try {
+    const remoteUrl = git(projectPath, ['remote', 'get-url', 'origin']).trim()
+    const repoMatch = remoteUrl.match(/[:/]([^/]+\/[^/]+?)(?:\.git)?$/)
+    if (repoMatch) {
+      const repo = repoMatch[1]
+      const prJson = execFileSync('gh', ['pr', 'list', '--head', branchName, '--state', 'all',
+        '--json', 'number,title,state,url', '-R', repo], { encoding: 'utf8', timeout: 8000 })
+      const prs = JSON.parse(prJson)
+      if (prs.length) detail.pr = prs[0]
+    }
+  } catch {}
+
+  return detail
+}
+
+// --- HTML ---
+const HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Git</title>
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Git" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="theme-color" content="#ffffff" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #F0F2F5;
+      color: #1a2332;
+      font-size: 13px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .header {
+      background: #ffffff;
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid #e2e6ea;
+      flex-shrink: 0;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    }
+    .header-title { font-size: 12px; font-weight: 800; color: #10b981; letter-spacing: 0.08em; text-transform: uppercase; flex-shrink: 0; }
+    /* Custom dropdown */
+    .dropdown { flex: 1; position: relative; min-width: 0; }
+    .dropdown-btn {
+      width: 100%; background: #F0F2F5; color: #1a2332;
+      border: 1px solid #d1d9e0; border-radius: 7px;
+      padding: 6px 10px; font-size: 12px; font-weight: 600; cursor: pointer;
+      display: flex; align-items: center; gap: 6px; text-align: left;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .dropdown-btn:hover { border-color: #10b981; }
+    .dropdown-btn.open { border-color: #10b981; box-shadow: 0 0 0 3px #d1fae5; border-radius: 7px 7px 0 0; }
+    .dropdown-btn-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .dropdown-btn-count {
+      background: #e2e6ea; color: #6b7280; font-size: 10px; font-weight: 700;
+      padding: 1px 6px; border-radius: 20px; flex-shrink: 0;
+    }
+    .dropdown-btn.open .dropdown-btn-count { background: #d1fae5; color: #065f46; }
+    .dropdown-arrow { color: #9ca3af; flex-shrink: 0; transition: transform 0.2s; font-size: 10px; }
+    .dropdown-btn.open .dropdown-arrow { transform: rotate(180deg); color: #10b981; }
+    .dropdown-list {
+      display: none; position: absolute; top: 100%; left: 0; right: 0; z-index: 100;
+      background: #ffffff; border: 1px solid #10b981; border-top: none;
+      border-radius: 0 0 7px 7px; box-shadow: 0 8px 20px rgba(0,0,0,0.12);
+      max-height: 240px; overflow-y: auto;
+    }
+    .dropdown-list.open { display: block; }
+    .dropdown-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 10px; cursor: pointer; transition: background 0.1s;
+      font-size: 12px; font-weight: 500; color: #1a2332;
+    }
+    .dropdown-item:hover { background: #f0fdf4; }
+    .dropdown-item.active { background: #f0fdf4; color: #065f46; font-weight: 700; }
+    .dropdown-item-name { flex: 1; }
+    .dropdown-item-count {
+      background: #f3f4f6; color: #9ca3af; font-size: 10px; font-weight: 700;
+      padding: 1px 6px; border-radius: 20px;
+    }
+    .dropdown-item.active .dropdown-item-count { background: #d1fae5; color: #065f46; }
+    .dropdown-item-check { color: #10b981; font-size: 11px; width: 14px; flex-shrink: 0; }
+    .icon-btn {
+      background: none; border: none; color: #9ca3af; cursor: pointer;
+      width: 28px; height: 28px; border-radius: 6px;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+      transition: color 0.15s, background 0.15s;
+    }
+    .icon-btn:hover { color: #10b981; background: #f0fdf4; }
+    .icon-btn.spinning svg { animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .branches { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+
+    /* Branch row */
+    .branch-wrap { display: flex; flex-direction: column; }
+    .branch {
+      background: #ffffff; border: 1px solid #e2e6ea; border-radius: 10px;
+      padding: 10px 12px; display: flex; align-items: flex-start; gap: 9px;
+      cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s;
+      user-select: none; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+    .branch:hover { border-color: #10b981; box-shadow: 0 2px 8px rgba(16,185,129,0.1); }
+    .branch.current { border-color: #10b981; background: #f0fdf4; }
+    .branch.gone { opacity: 0.5; }
+    .branch.open { border-radius: 10px 10px 0 0; border-bottom-color: #e2e6ea; box-shadow: none; }
+    .branch-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #d1d9e0; flex-shrink: 0; margin-top: 4px;
+    }
+    .branch.current .branch-dot { background: #10b981; box-shadow: 0 0 0 3px #d1fae5; }
+    .branch-info { flex: 1; min-width: 0; }
+    .branch-name { font-weight: 700; color: #1a2332; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+    .branch.current .branch-name { color: #065f46; }
+    .default-pill {
+      display: inline-block; font-size: 9px; font-weight: 700; color: #6b7280;
+      background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 4px;
+      padding: 1px 5px; margin-left: 6px; vertical-align: middle;
+      text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .branch-meta { color: #9ca3af; font-size: 11px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .branch-meta .hash { color: #d1d9e0; font-family: monospace; }
+    .branch-meta .author { color: #6b7280; font-weight: 500; }
+    .badges { display: flex; gap: 3px; align-items: flex-start; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+    .badge { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 20px; white-space: nowrap; }
+    .badge.gone   { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+    .badge.ahead  { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
+    .badge.behind { background: #fffbeb; color: #d97706; border: 1px solid #fde68a; }
+    .chevron { color: #d1d9e0; font-size: 10px; flex-shrink: 0; margin-top: 4px; transition: transform 0.2s, color 0.15s; }
+    .branch.open .chevron { transform: rotate(180deg); color: #10b981; }
+    .branch:hover .chevron { color: #10b981; }
+
+    /* Detail panel */
+    .detail {
+      background: #fafbfc; border: 1px solid #e2e6ea; border-top: none;
+      border-radius: 0 0 10px 10px; padding: 14px 16px;
+      display: none; flex-direction: column; gap: 16px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+    }
+    .detail.open { display: flex; }
+    .detail-loading { color: #9ca3af; font-size: 11px; font-style: italic; text-align: center; padding: 10px 0; }
+    .detail-section { display: flex; flex-direction: column; gap: 7px; }
+    .detail-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: #9ca3af; }
+
+    /* PR badge */
+    .pr-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 11px; border-radius: 7px; font-size: 11px; font-weight: 600;
+      text-decoration: none; border: 1px solid;
+    }
+    .pr-badge.open   { background: #f0fdf4; color: #16a34a; border-color: #bbf7d0; }
+    .pr-badge.merged { background: #f5f3ff; color: #7c3aed; border-color: #ddd6fe; }
+    .pr-badge.closed { background: #f9fafb; color: #6b7280; border-color: #e5e7eb; }
+    .pr-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+
+    /* Commits */
+    .commit { display: flex; gap: 8px; align-items: baseline; padding: 4px 0; border-bottom: 1px solid #f3f4f6; }
+    .commit:last-child { border-bottom: none; }
+    .commit-hash { font-family: monospace; font-size: 11px; color: #d1d9e0; flex-shrink: 0; }
+    .commit-subject { font-size: 12px; color: #374151; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .commit-meta { font-size: 10px; color: #9ca3af; flex-shrink: 0; white-space: nowrap; }
+    .no-data { font-size: 11px; color: #d1d9e0; font-style: italic; }
+
+    /* Files */
+    .file { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+    .file-name { font-size: 11px; color: #6b7280; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: monospace; }
+    .file-stat { font-size: 10px; font-weight: 700; flex-shrink: 0; display: flex; gap: 4px; }
+    .file-stat .add { color: #16a34a; }
+    .file-stat .del { color: #dc2626; }
+
+    /* Divergence */
+    .divergence { display: flex; gap: 14px; font-size: 12px; }
+    .div-item { display: flex; align-items: center; gap: 5px; }
+    .div-item .num { font-weight: 800; font-size: 15px; }
+    .div-item.d-ahead .num { color: #16a34a; }
+    .div-item.d-behind .num { color: #d97706; }
+    .div-item .label { color: #9ca3af; }
+
+    .footer {
+      padding: 7px 12px; border-top: 1px solid #e2e6ea;
+      display: flex; justify-content: space-between; align-items: center;
+      color: #9ca3af; font-size: 11px; flex-shrink: 0; background: #ffffff;
+    }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #e2e6ea; border-radius: 2px; }
+    ::-webkit-scrollbar-thumb:hover { background: #d1d9e0; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <span class="header-title">Git</span>
+    <div class="dropdown" id="dropdown">
+      <button class="dropdown-btn" id="dropdown-btn" onclick="toggleDropdown()">
+        <span class="dropdown-btn-name" id="dropdown-btn-name">Loading…</span>
+        <span class="dropdown-btn-count" id="dropdown-btn-count"></span>
+        <span class="dropdown-arrow">▾</span>
+      </button>
+      <div class="dropdown-list" id="dropdown-list"></div>
+    </div>
+    <button class="icon-btn" id="refresh-btn" onclick="refresh()" title="Refresh">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="branches" id="branches"><div style="color:#9ca3af;font-style:italic;text-align:center;padding:20px">Loading…</div></div>
+
+  <div class="footer">
+    <span id="status"></span>
+    <span id="last-updated"></span>
+  </div>
+
+  <script>
+    let projects = [], currentIdx = 0, openBranch = null
+
+    async function init() {
+      const res = await fetch('/api/projects')
+      projects = await res.json()
+      renderDropdownList()
+      loadProject(0)
+
+      // Close dropdown on outside click
+      document.addEventListener('click', e => {
+        if (!document.getElementById('dropdown').contains(e.target)) closeDropdown()
+      })
+    }
+
+    function renderDropdownList() {
+      document.getElementById('dropdown-list').innerHTML = projects.map((p, i) => \`
+        <div class="dropdown-item \${i===currentIdx?'active':''}" onclick="selectProject(\${i})">
+          <span class="dropdown-item-check">\${i===currentIdx?'✓':''}</span>
+          <span class="dropdown-item-name">\${esc(p.name)}</span>
+          <span class="dropdown-item-count">\${p.count}</span>
+        </div>
+      \`).join('')
+    }
+
+    function toggleDropdown() {
+      const btn = document.getElementById('dropdown-btn')
+      const list = document.getElementById('dropdown-list')
+      const open = list.classList.contains('open')
+      btn.classList.toggle('open', !open)
+      list.classList.toggle('open', !open)
+    }
+
+    function closeDropdown() {
+      document.getElementById('dropdown-btn').classList.remove('open')
+      document.getElementById('dropdown-list').classList.remove('open')
+    }
+
+    function selectProject(idx) {
+      closeDropdown()
+      if (idx === currentIdx) return
+      loadProject(idx)
+    }
+
+    function updateDropdownBtn() {
+      const p = projects[currentIdx]
+      document.getElementById('dropdown-btn-name').textContent = p.name
+      document.getElementById('dropdown-btn-count').textContent = p.count + ' branch' + (p.count !== 1 ? 'es' : '')
+      renderDropdownList()
+    }
+
+    async function loadProject(idx) {
+      currentIdx = parseInt(idx)
+      openBranch = null
+      updateDropdownBtn()
+      document.getElementById('branches').innerHTML = '<div style="color:#9ca3af;font-style:italic;text-align:center;padding:20px">Loading…</div>'
+      const res = await fetch('/api/branches?project=' + currentIdx)
+      const { branches, defaultBranch } = await res.json()
+      // Update count from actual branch data
+      projects[currentIdx].count = branches.length
+      updateDropdownBtn()
+      renderBranches(branches, defaultBranch)
+    }
+
+    function renderBranches(branches, defaultBranch) {
+      if (!branches.length) {
+        document.getElementById('branches').innerHTML = '<div style="color:#9ca3af;font-style:italic;text-align:center;padding:20px">No branches found</div>'
+        return
+      }
+      const sorted = [
+        ...branches.filter(b => b.current),
+        ...branches.filter(b => !b.current && b.name === defaultBranch),
+        ...branches.filter(b => !b.current && b.name !== defaultBranch),
+      ]
+      document.getElementById('status').textContent = branches.length + ' branch' + (branches.length !== 1 ? 'es' : '')
+      document.getElementById('last-updated').textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      document.getElementById('branches').innerHTML = sorted.map(b => \`
+        <div class="branch-wrap" data-branch="\${esc(b.name)}">
+          <div class="branch \${b.current?'current':''} \${b.gone?'gone':''}"
+               onclick="toggleDetail(this, '\${esc(b.name)}')">
+            <div class="branch-dot"></div>
+            <div class="branch-info">
+              <div class="branch-name">\${esc(b.name)}\${b.name===defaultBranch&&!b.current?'<span class="default-pill">default</span>':''}</div>
+              <div class="branch-meta">
+                <span class="hash">\${b.hash}</span>
+                · <span class="author">\${esc(b.author)}</span>
+                · \${b.date}
+                \${b.subject ? '· ' + esc(b.subject.slice(0,55)) + (b.subject.length>55?'…':'') : ''}
+              </div>
+            </div>
+            <div class="badges">
+              \${b.gone   ? '<span class="badge gone">gone</span>' : ''}
+              \${b.ahead  ? \`<span class="badge ahead">↑\${b.ahead}</span>\` : ''}
+              \${b.behind ? \`<span class="badge behind">↓\${b.behind}</span>\` : ''}
+            </div>
+            <span class="chevron">▾</span>
+          </div>
+          <div class="detail" id="detail-\${esc(b.name)}">
+            <div class="detail-loading">Loading…</div>
+          </div>
+        </div>
+      \`).join('')
+    }
+
+    async function toggleDetail(branchEl, branchName) {
+      const wrap = branchEl.closest('.branch-wrap')
+      const detail = wrap.querySelector('.detail')
+      const isOpen = detail.classList.contains('open')
+
+      // Close any open panel
+      document.querySelectorAll('.branch.open').forEach(el => {
+        el.classList.remove('open')
+        el.closest('.branch-wrap').querySelector('.detail').classList.remove('open')
+      })
+
+      if (isOpen) return
+
+      branchEl.classList.add('open')
+      detail.classList.add('open')
+      detail.innerHTML = '<div class="detail-loading">Loading…</div>'
+
+      const res = await fetch(\`/api/branch-detail?project=\${currentIdx}&branch=\${encodeURIComponent(branchName)}\`)
+      const data = await res.json()
+      renderDetail(detail, data)
+    }
+
+    function renderDetail(el, d) {
+      const prHtml = d.pr
+        ? \`<a class="pr-badge \${d.pr.state.toLowerCase()}" href="\${d.pr.url}" target="_blank">
+            <span class="pr-dot"></span>
+            #\${d.pr.number} \${esc(d.pr.title)}
+            <span style="opacity:0.6;font-size:9px;text-transform:uppercase">\${d.pr.state}</span>
+           </a>\`
+        : '<span style="color:#334155;font-size:11px;font-style:italic">No pull request</span>'
+
+      const commitsHtml = d.commits.length
+        ? d.commits.map(c => \`
+            <div class="commit">
+              <span class="commit-hash">\${c.hash}</span>
+              <span class="commit-subject">\${esc(c.subject)}</span>
+              <span class="commit-meta">\${esc(c.author)} · \${c.date}</span>
+            </div>\`).join('')
+        : '<span class="no-commits">No unique commits vs default branch</span>'
+
+      const filesHtml = d.files.length
+        ? d.files.slice(0, 12).map(f => \`
+            <div class="file">
+              <span class="file-name">\${esc(f.name)}</span>
+              <span class="file-stat">
+                \${f.additions ? \`<span class="add">+\${f.additions}</span>\` : ''}
+                \${f.deletions ? \`<span class="del"> -\${f.deletions}</span>\` : ''}
+              </span>
+            </div>\`).join('')
+          + (d.files.length > 12 ? \`<div style="color:#334155;font-size:10px">+ \${d.files.length-12} more files</div>\` : '')
+        : '<span class="no-commits">No file changes vs default branch</span>'
+
+      const divHtml = \`
+        <div class="divergence">
+          <div class="div-item d-ahead">
+            <span class="num">\${d.ahead}</span>
+            <span class="label">commit\${d.ahead!==1?'s':''} ahead</span>
+          </div>
+          <div class="div-item d-behind">
+            <span class="num">\${d.behind}</span>
+            <span class="label">behind</span>
+          </div>
+        </div>\`
+
+      el.innerHTML = \`
+        <div class="detail-section">
+          <div class="detail-label">Pull Request</div>
+          \${prHtml}
+        </div>
+        <div class="detail-section">
+          <div class="detail-label">Divergence</div>
+          \${divHtml}
+        </div>
+        <div class="detail-section">
+          <div class="detail-label">Commits not in default branch</div>
+          \${commitsHtml}
+        </div>
+        <div class="detail-section">
+          <div class="detail-label">Changed files</div>
+          \${filesHtml}
+        </div>
+      \`
+    }
+
+    function refresh() {
+      const btn = document.getElementById('refresh-btn')
+      btn.classList.add('spinning')
+      loadProject(currentIdx).finally(() => btn.classList.remove('spinning'))
+    }
+
+    function esc(str) {
+      return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+    }
+
+    init()
+  </script>
+</body>
+</html>`
+
+// --- Server ---
+const PROJECTS = findRepos(SCAN_DIR)
+if (PROJECTS.length === 0) {
+  console.error(`No git repos found in ${SCAN_DIR}`)
+  console.error(`Usage: node git-dashboard.js [path/to/your/projects]`)
+  process.exit(1)
+}
+
+createServer((req, res) => {
+  const url = new URL(req.url, `http://localhost:${PORT}`)
+
+  if (url.pathname === '/apple-touch-icon.png' || url.pathname === '/favicon.png') {
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' })
+    res.end(ICON_PNG)
+    return
+  }
+
+  if (url.pathname === '/api/projects') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(PROJECTS.map(p => ({ name: p.name, count: getBranchCount(p.path) }))))
+    return
+  }
+
+  if (url.pathname === '/api/branches') {
+    const idx = parseInt(url.searchParams.get('project') || '0')
+    const project = PROJECTS[idx]
+    if (!project) { res.writeHead(404); res.end('{}'); return }
+    const branches = getBranches(project.path)
+    const defaultBranch = getDefaultBranch(project.path)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ branches, defaultBranch }))
+    return
+  }
+
+  if (url.pathname === '/api/branch-detail') {
+    const idx = parseInt(url.searchParams.get('project') || '0')
+    const branch = url.searchParams.get('branch') || ''
+    const project = PROJECTS[idx]
+    if (!project || !branch) { res.writeHead(404); res.end('{}'); return }
+    const defaultBranch = getDefaultBranch(project.path)
+    const detail = getBranchDetail(project.path, branch, defaultBranch)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(detail))
+    return
+  }
+
+  res.writeHead(200, { 'Content-Type': 'text/html' })
+  res.end(HTML)
+}).listen(PORT, '127.0.0.1', () => {
+  console.log(`Git Dashboard → http://localhost:${PORT}`)
+  console.log(`Scanning: ${SCAN_DIR}`)
+  console.log(`Found ${PROJECTS.length} repos: ${PROJECTS.map(p => p.name).join(', ')}`)
+})
