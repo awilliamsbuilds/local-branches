@@ -2,7 +2,15 @@
 
 A local web dashboard for browsing your git repos and branches. No build step, no dependencies — just Node.js.
 
-![screenshot placeholder](https://via.placeholder.com/600x400)
+## Quick start
+
+```bash
+git clone https://github.com/awilliamsbuilds/local-branches
+cd local-branches
+node git-dashboard.js ~/path/to/your/projects
+```
+
+No `npm install` needed — zero dependencies.
 
 ## What it does
 
