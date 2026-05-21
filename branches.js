@@ -5,120 +5,14 @@
 
 import { createServer } from 'http'
 import { execFileSync, execSync } from 'child_process'
-import { readdirSync, existsSync } from 'fs'
+import { readdirSync, existsSync, readFileSync } from 'fs'
 import { join, resolve } from 'path'
 import { homedir } from 'os'
-import { deflateSync } from 'zlib'
 
 const PORT = 7799
 const SEP = '\x1f'
 
-// --- Icon PNG generator (no npm deps — pure Node built-ins) ---
-function createIconPNG() {
-  const SIZE = 512
-
-  // CRC32 table
-  const crcTable = new Uint32Array(256)
-  for (let i = 0; i < 256; i++) {
-    let c = i
-    for (let j = 0; j < 8; j++) c = (c & 1) ? 0xEDB88320 ^ (c >>> 1) : c >>> 1
-    crcTable[i] = c >>> 0
-  }
-  function crc32(buf) {
-    let c = 0xFFFFFFFF
-    for (const b of buf) c = crcTable[(c ^ b) & 0xFF] ^ (c >>> 8)
-    return (c ^ 0xFFFFFFFF) >>> 0
-  }
-  function pngChunk(type, data) {
-    const t = Buffer.from(type, 'ascii')
-    const d = Buffer.isBuffer(data) ? data : Buffer.from(data)
-    const len = Buffer.alloc(4); len.writeUInt32BE(d.length)
-    const crcBuf = Buffer.alloc(4); crcBuf.writeUInt32BE(crc32(Buffer.concat([t, d])))
-    return Buffer.concat([len, t, d, crcBuf])
-  }
-
-  // Distance from point to line segment (for anti-aliased line drawing)
-  function lineDist(px, py, x1, y1, x2, y2) {
-    const dx = x2 - x1, dy = y2 - y1
-    const lenSq = dx * dx + dy * dy
-    if (lenSq === 0) return Math.hypot(px - x1, py - y1)
-    const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq))
-    return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
-  }
-
-  // Anti-aliased alpha: 1.0 inside, 0.0 outside, smooth edge ±1.5px
-  function edgeAlpha(dist, radius) {
-    return Math.max(0, Math.min(1, (radius + 1.5 - dist) / 3))
-  }
-
-  // Blend colorA (background) toward colorB by alpha
-  function blend(bg, fg, alpha) {
-    return bg.map((v, i) => Math.round(v * (1 - alpha) + fg[i] * alpha))
-  }
-
-  // Colors — GitHub dark theme palette
-  const BG    = [13, 17, 23]      // #0d1117  GitHub dark background
-  const GREEN = [137, 87, 229]    // #8957e5  GitHub purple
-
-  const LINE_W = 13  // stroke half-width (scaled)
-
-  // Node positions and radii — scaled 0.85× and re-centered on 256,256
-  // Gives ~14% padding on all sides so macOS rounded-rect mask doesn't clip
-  const nBottom = [204, 395]; const rBottom = 42
-  const nTop    = [204, 115]; const rTop    = 42
-  const nBranch = [332, 272]; const rBranch = 36
-
-  // Curved branch: horizontal from stem to arc start, then quarter-circle arc up to branch node
-  // Arc center at (276, 272), radius 55 → bottom=(276,327), right=(331,272)
-  const arcCX = 276, arcCY = 272, arcR = 55
-  const horizY = arcCY + arcR  // 327 — y of horizontal segment
-
-  // Build pixel data
-  const rows = []
-  for (let y = 0; y < SIZE; y++) {
-    rows.push(0) // PNG filter: None
-    for (let x = 0; x < SIZE; x++) {
-      let rgb = [...BG]
-
-      // Vertical stem
-      const stemA = edgeAlpha(lineDist(x, y, nBottom[0], nBottom[1], nTop[0], nTop[1]), LINE_W)
-      if (stemA > 0) rgb = blend(rgb, GREEN, stemA)
-
-      // Horizontal segment (stem x → arc center x, at horizY)
-      const horizA = edgeAlpha(lineDist(x, y, nBottom[0], horizY, arcCX, horizY), LINE_W)
-      if (horizA > 0) rgb = blend(rgb, GREEN, horizA)
-
-      // Quarter-circle arc from angle=0 (right) to angle=π/2 (down-in-screen = toward horizY)
-      const adx = x - arcCX, ady = y - arcCY
-      const arcAngle = Math.atan2(ady, adx)
-      if (arcAngle >= 0 && arcAngle <= Math.PI / 2) {
-        const arcA = edgeAlpha(Math.abs(Math.hypot(adx, ady) - arcR), LINE_W)
-        if (arcA > 0) rgb = blend(rgb, GREEN, arcA)
-      }
-
-      // Solid filled nodes
-      for (const [[nx, ny], r] of [[nBottom, rBottom], [nTop, rTop], [nBranch, rBranch]]) {
-        const a = edgeAlpha(Math.hypot(x - nx, y - ny), r)
-        if (a > 0) rgb = blend(rgb, GREEN, a)
-      }
-
-      rows.push(rgb[0], rgb[1], rgb[2], 255)
-    }
-  }
-
-  const ihdr = Buffer.alloc(13)
-  ihdr.writeUInt32BE(SIZE, 0); ihdr.writeUInt32BE(SIZE, 4)
-  ihdr[8] = 8; ihdr[9] = 6 // 8-bit RGBA
-
-  return Buffer.concat([
-    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), // PNG signature
-    pngChunk('IHDR', ihdr),
-    pngChunk('IDAT', deflateSync(Buffer.from(rows))),
-    pngChunk('IEND', Buffer.alloc(0)),
-  ])
-}
-
-const ICON_PNG = createIconPNG()
+const ICON_PNG = readFileSync(new URL('./icon.png', import.meta.url))
 
 const MANIFEST = JSON.stringify({
   name: 'Branches',
