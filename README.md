@@ -1,13 +1,13 @@
-# local-branches
+# branches
 
 A local web dashboard for browsing your git repos and branches. No build step, no dependencies — just Node.js.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/awilliamsbuilds/local-branches
-cd local-branches
-node git-dashboard.js ~/path/to/your/projects
+git clone https://github.com/awilliamsbuilds/branches
+cd branches
+node branches.js ~/path/to/your/projects
 ```
 
 No `npm install` needed — zero dependencies.
@@ -29,17 +29,17 @@ No `npm install` needed — zero dependencies.
 
 ```bash
 # Point it at a directory full of git repos
-node git-dashboard.js ~/code/my-projects
+node branches.js ~/code/my-projects
 
 # Opens at http://localhost:7799
 ```
 
-If you don't pass a path it defaults to `~/Documents/GitHub`.
+If you don't pass a path it defaults to `~/Development`.
 
 ## Run on startup (macOS)
 
 Add an alias to your shell profile:
 
 ```bash
-alias branches='node ~/path/to/git-dashboard.js ~/your/projects'
+alias branches='node ~/path/to/branches.js ~/your/projects'
 ```

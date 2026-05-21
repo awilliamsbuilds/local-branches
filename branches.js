@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Git Branch Dashboard
-// Usage: node git-dashboard.js [path/to/your/projects]
+// Branches
+// Usage: node branches.js [path/to/your/projects]
 // Opens at http://localhost:7799
 
 import { createServer } from 'http'
@@ -121,7 +121,7 @@ function createIconPNG() {
 const ICON_PNG = createIconPNG()
 
 const MANIFEST = JSON.stringify({
-  name: 'Git Dashboard',
+  name: 'Branches',
   short_name: 'Git',
   description: 'Local git branch dashboard',
   start_url: '/',
@@ -136,7 +136,7 @@ const MANIFEST = JSON.stringify({
 // Directory to scan for git repos — pass as a CLI argument or set a default below
 const SCAN_DIR = process.argv[2]
   ? resolve(process.argv[2])
-  : join(homedir(), 'Documents', 'GitHub')
+  : join(homedir(), 'Development')
 
 // --- Discover git repos ---
 function findRepos(dir) {
@@ -235,12 +235,12 @@ const HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Git</title>
+  <title>Branches</title>
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" href="/apple-touch-icon.png" type="image/png" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-title" content="Git" />
+  <meta name="apple-mobile-web-app-title" content="Branches" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="theme-color" content="#ffffff" />
   <style>
@@ -425,7 +425,7 @@ const HTML = `<!DOCTYPE html>
 </head>
 <body>
   <div class="header">
-    <span class="header-title">Git</span>
+    <span class="header-title">Branches</span>
     <div class="dropdown" id="dropdown">
       <button class="dropdown-btn" id="dropdown-btn" onclick="toggleDropdown()">
         <span class="dropdown-btn-name" id="dropdown-btn-name">Loading…</span>
@@ -675,7 +675,7 @@ const HTML = `<!DOCTYPE html>
 const PROJECTS = findRepos(SCAN_DIR)
 if (PROJECTS.length === 0) {
   console.error(`No git repos found in ${SCAN_DIR}`)
-  console.error(`Usage: node git-dashboard.js [path/to/your/projects]`)
+  console.error(`Usage: node branches.js [path/to/your/projects]`)
   process.exit(1)
 }
 
@@ -726,7 +726,7 @@ createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/html' })
   res.end(HTML)
 }).listen(PORT, '127.0.0.1', () => {
-  console.log(`Git Dashboard → http://localhost:${PORT}`)
+  console.log(`Branches → http://localhost:${PORT}`)
   console.log(`Scanning: ${SCAN_DIR}`)
   console.log(`Found ${PROJECTS.length} repos: ${PROJECTS.map(p => p.name).join(', ')}`)
 })
