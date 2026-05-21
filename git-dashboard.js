@@ -335,8 +335,18 @@ const HTML = `<!DOCTYPE html>
     }
     .branch.current .branch-dot { background: #10b981; box-shadow: 0 0 0 3px #d1fae5; }
     .branch-info { flex: 1; min-width: 0; }
-    .branch-name { font-weight: 700; color: #1a2332; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+    .branch-name { font-weight: 700; color: #1a2332; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; display: flex; align-items: center; gap: 5px; }
     .branch.current .branch-name { color: #065f46; }
+    .copy-btn {
+      background: none; border: none; padding: 1px 3px; cursor: pointer; border-radius: 4px;
+      color: #d1d9e0; flex-shrink: 0; line-height: 0;
+      transition: color 0.15s, background 0.15s;
+    }
+    .copy-btn:hover { color: #10b981; background: #d1fae5; }
+    .copy-btn.copied { color: #10b981; }
+    .copy-btn .icon-check { display: none; }
+    .copy-btn.copied .icon-clipboard { display: none; }
+    .copy-btn.copied .icon-check { display: inline; }
     .default-pill {
       display: inline-block; font-size: 9px; font-weight: 700; color: #6b7280;
       background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 4px;
@@ -520,7 +530,19 @@ const HTML = `<!DOCTYPE html>
                onclick="toggleDetail(this, '\${esc(b.name)}')">
             <div class="branch-dot"></div>
             <div class="branch-info">
-              <div class="branch-name">\${esc(b.name)}\${b.name===defaultBranch&&!b.current?'<span class="default-pill">default</span>':''}</div>
+              <div class="branch-name">
+                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">\${esc(b.name)}</span>
+                \${b.name===defaultBranch&&!b.current?'<span class="default-pill">default</span>':''}
+                <button class="copy-btn" onclick="copyBranch(event, this, '\${esc(b.name)}')" title="Copy branch name">
+                  <svg class="icon-clipboard" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                  </svg>
+                  <svg class="icon-check" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                </button>
+              </div>
               <div class="branch-meta">
                 <span class="hash">\${b.hash}</span>
                 · <span class="author">\${esc(b.author)}</span>
@@ -624,6 +646,13 @@ const HTML = `<!DOCTYPE html>
           \${filesHtml}
         </div>
       \`
+    }
+
+    async function copyBranch(e, btn, name) {
+      e.stopPropagation()
+      await navigator.clipboard.writeText(name)
+      btn.classList.add('copied')
+      setTimeout(() => btn.classList.remove('copied'), 1500)
     }
 
     function refresh() {
