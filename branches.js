@@ -122,8 +122,8 @@ const ICON_PNG = createIconPNG()
 
 const MANIFEST = JSON.stringify({
   name: 'Branches',
-  short_name: 'Git',
-  description: 'Local git branch dashboard',
+  short_name: 'Branches',
+  description: 'Local git branch viewer',
   start_url: '/',
   display: 'standalone',
   background_color: '#ffffff',
