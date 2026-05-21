@@ -60,17 +60,18 @@ function createIconPNG() {
   const BG    = [13, 17, 23]      // #0d1117  GitHub dark background
   const GREEN = [137, 87, 229]    // #8957e5  GitHub purple
 
-  const LINE_W = 15  // stroke half-width
+  const LINE_W = 13  // stroke half-width (scaled)
 
-  // Node positions and radii
-  const nBottom = [195, 420]; const rBottom = 50
-  const nTop    = [195,  90]; const rTop    = 50
-  const nBranch = [345, 275]; const rBranch = 42
+  // Node positions and radii — scaled 0.85× and re-centered on 256,256
+  // Gives ~14% padding on all sides so macOS rounded-rect mask doesn't clip
+  const nBottom = [204, 395]; const rBottom = 42
+  const nTop    = [204, 115]; const rTop    = 42
+  const nBranch = [332, 272]; const rBranch = 36
 
   // Curved branch: horizontal from stem to arc start, then quarter-circle arc up to branch node
-  // Arc center at (280, 275), radius 65 → bottom=(280,340), right=(345,275)
-  const arcCX = 280, arcCY = 275, arcR = 65
-  const horizY = arcCY + arcR  // 340 — y of horizontal segment
+  // Arc center at (276, 272), radius 55 → bottom=(276,327), right=(331,272)
+  const arcCX = 276, arcCY = 272, arcR = 55
+  const horizY = arcCY + arcR  // 327 — y of horizontal segment
 
   // Build pixel data
   const rows = []
@@ -83,7 +84,7 @@ function createIconPNG() {
       const stemA = edgeAlpha(lineDist(x, y, nBottom[0], nBottom[1], nTop[0], nTop[1]), LINE_W)
       if (stemA > 0) rgb = blend(rgb, GREEN, stemA)
 
-      // Horizontal segment (stem x → arc start x, at horizY)
+      // Horizontal segment (stem x → arc center x, at horizY)
       const horizA = edgeAlpha(lineDist(x, y, nBottom[0], horizY, arcCX, horizY), LINE_W)
       if (horizA > 0) rgb = blend(rgb, GREEN, horizA)
 
