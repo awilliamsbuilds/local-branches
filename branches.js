@@ -567,10 +567,20 @@ const HTML = `<!DOCTYPE html>
       setTimeout(() => btn.classList.remove('copied'), 1500)
     }
 
-    function refresh() {
+    async function refresh() {
       const btn = document.getElementById('refresh-btn')
       btn.classList.add('spinning')
-      loadProject(currentIdx).finally(() => btn.classList.remove('spinning'))
+      try {
+        const currentName = projects[currentIdx] && projects[currentIdx].name
+        const res = await fetch('/api/projects')
+        projects = await res.json()
+        const matched = projects.findIndex(p => p.name === currentName)
+        currentIdx = matched >= 0 ? matched : 0
+        renderDropdownList()
+        await loadProject(currentIdx)
+      } finally {
+        btn.classList.remove('spinning')
+      }
     }
 
     function esc(str) {
@@ -583,7 +593,7 @@ const HTML = `<!DOCTYPE html>
 </html>`
 
 // --- Server ---
-const PROJECTS = findRepos(SCAN_DIR)
+let PROJECTS = findRepos(SCAN_DIR)
 if (PROJECTS.length === 0) {
   console.error(`No git repos found in ${SCAN_DIR}`)
   console.error(`Usage: node branches.js [path/to/your/projects]`)
@@ -606,6 +616,7 @@ createServer((req, res) => {
   }
 
   if (url.pathname === '/api/projects') {
+    PROJECTS = findRepos(SCAN_DIR)
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(PROJECTS.map(p => ({ name: p.name, count: getBranchCount(p.path) }))))
     return
