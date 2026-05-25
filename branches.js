@@ -33,12 +33,29 @@ const SCAN_DIR = process.argv[2]
   : join(homedir(), 'Development')
 
 // --- Discover git repos ---
+// Scans `dir` for git repos. If a subdirectory isn't a repo itself, descends
+// one extra level so grouped layouts like ~/Development/<org>/<repo> work.
 function findRepos(dir) {
   if (!existsSync(dir)) return []
-  return readdirSync(dir, { withFileTypes: true })
-    .filter(e => e.isDirectory() && existsSync(join(dir, e.name, '.git')))
-    .map(e => ({ name: e.name, path: join(dir, e.name) }))
-    .sort((a, b) => a.name.localeCompare(b.name))
+  const repos = []
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (!e.isDirectory() || e.name.startsWith('.')) continue
+    const childPath = join(dir, e.name)
+    if (existsSync(join(childPath, '.git'))) {
+      repos.push({ name: e.name, path: childPath })
+      continue
+    }
+    try {
+      for (const grand of readdirSync(childPath, { withFileTypes: true })) {
+        if (!grand.isDirectory() || grand.name.startsWith('.')) continue
+        const grandPath = join(childPath, grand.name)
+        if (existsSync(join(grandPath, '.git'))) {
+          repos.push({ name: `${e.name}/${grand.name}`, path: grandPath })
+        }
+      }
+    } catch {}
+  }
+  return repos.sort((a, b) => a.name.localeCompare(b.name))
 }
 
 function git(cwd, args, opts = {}) {
